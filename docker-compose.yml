@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stats}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stats}
+      POSTGRES_DB: ${POSTGRES_DB:-stats}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stats}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-stats}:${POSTGRES_PASSWORD:-stats}@db:5432/${POSTGRES_DB:-stats}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-stats}:${POSTGRES_PASSWORD:-stats}@db:5432/${POSTGRES_DB:-stats}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=2
+
+  locust:
+    build: .
+    profiles: ["loadtest"]
+    environment:
+      TARGET_HOST: http://api:8000
+    depends_on:
+      - api
+    ports:
+      - "8089:8089"
+    command: locust -f locustfile.py --host=http://api:8000
+
+volumes:
+  pgdata:
